@@ -1,10 +1,11 @@
 import json, os, re, urllib.request
 
 PLID = "PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7"
+CTRL = "PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 API = "https://www.youtube.com/youtubei/v1/browse?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false"
+NEXT = "https://www.youtube.com/youtubei/v1/next?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false"
 WEB = {"clientName": "WEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}
-MWEB = {"clientName": "MWEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}
 
 def get(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
@@ -46,125 +47,71 @@ def txt(x):
         return x.get("simpleText", "")
     return str(x)
 
-def raw_items(d):
-    out = []
-    pvrs = []
-    walk(d, "playlistVideoRenderer", pvrs)
-    for p in pvrs:
-        out.append({"videoId": p.get("videoId"), "title": txt(p.get("title"))})
-    lus = []
-    walk(d, "lockupViewModel", lus)
-    for l in lus:
-        t = ""
-        try:
-            t = txt(l.get("metadata", {}).get("lockupMetadataViewModel", {}).get("title"))
-        except Exception:
-            pass
-        out.append({"videoId": l.get("contentId"), "title": t})
-    return out
-
-def get_tokens(d):
-    toks = []
-    for key in ("continuationCommand", "getContinuationCommand", "nextContinuationData"):
-        found = []
-        walk(d, key, found)
-        for f in found:
-            t = f.get("token") if isinstance(f, dict) else None
-            if t and t not in toks:
-                toks.append(t)
-    return toks
-
-def get_tokens2(d):
-    toks = []
-    found = []
-    walk(d, "continuationItemViewModel", found)
-    for f in found:
-        s = json.dumps(f)
-        for m in re.finditer(r'"token":\s*"([^"]+)"', s):
-            if m.group(1) not in toks:
-                toks.append(m.group(1))
-    for key in ("continuationCommand", "getContinuationCommand", "nextContinuationData"):
-        found = []
-        walk(d, key, found)
-        for f in found:
-            t = f.get("token") if isinstance(f, dict) else None
-            if t and t not in toks:
-                toks.append(t)
-    return toks
+def header_texts(data):
+    phs = []
+    walk(data, "pageHeaderViewModel", phs)
+    if not phs:
+        return []
+    texts = []
+    def ct(o):
+        if isinstance(o, dict):
+            if isinstance(o.get("content"), str) and o.get("content"):
+                texts.append(o["content"])
+            for v in o.values():
+                ct(v)
+        elif isinstance(o, list):
+            for v in o:
+                ct(v)
+    ct(phs[0])
+    return texts
 
 D = []
 os.makedirs("out", exist_ok=True)
 
-page = get("https://www.youtube.com/playlist?list=%s&hl=en&persist_hl=1" % PLID)
-data = parse_json_after(page, "var ytInitialData = ")
-
-# count contexts with big numbers
-big = []
-for m in re.finditer(r"(\d[\d,]{0,6})\s*videos?", page):
-    n = m.group(1)
+for tag, plid in [("TARGET", PLID), ("CTRL", CTRL)]:
     try:
-        if int(n.replace(",", "")) > 5:
-            s = max(0, m.start() - 200)
-            big.append("NUM=%s CTX=%s" % (n, re.sub(r"\s+", " ", page[s:m.end() + 80])))
-    except Exception:
-        pass
-D.append("big_count_matches=%d" % len(big))
-open("out/bigcount.txt", "w").write("\n===\n".join(big[:30]))
+        page = get("https://www.youtube.com/playlist?list=%s&hl=en&persist_hl=1" % plid)
+        data = parse_json_after(page, "var ytInitialData = ")
+        D.append("%s header=%s" % (tag, json.dumps(header_texts(data))))
+        D.append("%s has_show_unavailable=%s" % (tag, "Show unavailable videos" in page))
+    except Exception as e:
+        D.append("%s err=%r" % (tag, e))
 
-# page header metadata
-phs = []
-walk(data, "pageHeaderViewModel", phs)
-D.append("pageHeaderViewModel=%d" % len(phs))
-if phs:
-    open("out/page_header.json", "w").write(json.dumps(phs[0], indent=1)[:20000])
-    texts = []
-    def collect_text(o):
-        if isinstance(o, dict):
-            if isinstance(o.get("content"), str) and o.get("content"):
-                texts.append(o["content"])
-            if isinstance(o.get("text"), str) and o.get("text"):
-                texts.append(o["text"])
-            for v in o.values():
-                collect_text(v)
-        elif isinstance(o, list):
-            for v in o:
-                collect_text(v)
-    collect_text(phs[0])
-    D.append("header_texts=%s" % json.dumps(texts[:40]))
-
-# playlist metadata renderer
-pmr = []
-walk(data, "playlistMetadataRenderer", pmr)
-if pmr:
-    D.append("playlistMetadata=%s" % json.dumps(pmr[0])[:800])
-
-# MWEB full pagination with token2
+# playlist panel via watch page
 try:
-    d = json.loads(post(API, {"context": {"client": MWEB}, "browseId": "VL" + PLID}))
-    allitems = raw_items(d)
-    pending = get_tokens2(d)
-    used = set()
-    guard = 0
-    D.append("mweb_first=%d toks2=%d" % (len(allitems), len(pending)))
-    while pending and guard < 20:
-        guard += 1
-        tok = pending.pop(0)
-        if tok in used:
-            continue
-        used.add(tok)
-        d2 = json.loads(post(API, {"context": {"client": MWEB}, "continuation": tok}))
-        got = raw_items(d2)
-        D.append("mweb_c+%d" % len(got))
-        allitems.extend(got)
-        for t in get_tokens2(d2):
-            if t not in used and t not in pending:
-                pending.append(t)
-    from collections import Counter
-    cc = Counter([x["videoId"] for x in allitems])
-    D.append("mweb_total=%d distinct=%d" % (len(allitems), len(cc)))
-    open("out/mweb_ids.txt", "w").write("\n".join("%s\t%s" % (x["videoId"], x["title"]) for x in allitems))
+    w = get("https://www.youtube.com/watch?v=SSKVgrwhzus&list=%s&hl=en" % PLID)
+    pr = parse_json_after(w, "ytInitialPlayerResponse = ")
+    wd = parse_json_after(w, "var ytInitialData = ")
+    D.append("watch_len=%d" % len(w))
+    if wd:
+        panes = []
+        walk(wd, "playlistPanelVideoRenderer", panes)
+        D.append("panel_items=%d" % len(panes))
+        rows = []
+        for p in panes:
+            rows.append("%s\t%s\t%s" % (p.get("videoId"), txt(p.get("title")), txt(p.get("unplayableText"))))
+        open("out/panel_ids.txt", "w").write("\n".join(rows))
+        lu = []
+        walk(wd, "lockupViewModel", lu)
+        D.append("watch_lockups=%d" % len(lu))
+        # also check for any "Private video" strings
+        D.append("watch_private=%d deleted=%d" % (w.count("Private video"), w.count("Deleted video")))
 except Exception as e:
-    D.append("mweb_err=%r" % (e,))
+    D.append("watch_err=%r" % (e,))
+
+# next endpoint with playlistId
+try:
+    r = post(NEXT, {"context": {"client": WEB}, "playlistId": PLID, "videoId": "SSKVgrwhzus"})
+    d = json.loads(r)
+    panes = []
+    walk(d, "playlistPanelVideoRenderer", panes)
+    D.append("next_panel=%d" % len(panes))
+    rows = []
+    for p in panes:
+        rows.append("%s\t%s\t%s" % (p.get("videoId"), txt(p.get("title")), txt(p.get("unplayableText"))))
+    open("out/next_panel_ids.txt", "w").write("\n".join(rows))
+except Exception as e:
+    D.append("next_err=%r" % (e,))
 
 open("out/debug.txt", "w").write("\n".join(D))
 print("\n".join(D))
