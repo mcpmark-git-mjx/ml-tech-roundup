@@ -1,9 +1,6 @@
-TARGET header=["MCP-youtube", "by Jian Zhao", "Playlist", "52 videos", "44 views", "Shuffle", "Show unavailable videos", "...more", "Play all"]
-TARGET has_show_unavailable=True
-CTRL header=[]
-CTRL has_show_unavailable=False
-watch_len=2399497
-panel_items=50
-watch_lockups=26
-watch_private=0 deleted=0
-next_panel=50
+params=wgYCCAA= raw=52 toks=1
+c+0
+params=wgYCCAA= merged=52
+params=wgYCCAA%3D raw=52 toks=1
+c+0
+params=wgYCCAA%3D merged=52
