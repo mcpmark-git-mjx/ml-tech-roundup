@@ -1,10 +1,6 @@
-page_raw=50
-page_distinct=50 dups={}
-page_tokens=1
-page_count_text=52
-browse[WEB] raw=50 kinds=lockup distinct=50 dups={} tokens=1
-tok0 items=0 kinds= keys=
-browse[ANDROID] err=<HTTPError 400: 'Bad Request'>
-browse[MWEB] raw=20 kinds=lockup distinct=20 dups={} tokens=1
-browse[TVHTML5] raw=0 kinds= distinct=0 dups={} tokens=0
-browse[WEB_EMBEDDED_PLAYER] err=<HTTPError 400: 'Bad Request'>
+VIDEO_CTX_COUNT=1396
+web_toks=1
+web_cont_len=1206
+mweb_first=20 toks=1
+mweb_c+20
+mweb_total=40 distinct=40
