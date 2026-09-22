@@ -3,7 +3,7 @@ import json, os, re, urllib.request
 PLID = "PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 API = "https://www.youtube.com/youtubei/v1/browse?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false"
-WEBCTX = {"context": {"client": {"clientName": "WEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}}}
+WEB = {"clientName": "WEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}
 
 def get(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
@@ -56,19 +56,17 @@ def get_tokens(d):
                 toks.append(t)
     return toks
 
-items = []
-seen = set()
-diag = []
+def extract_items(d):
+    out = []
+    seen = set()
 
-def add(vid, title, byline="", length="", info=""):
-    if not vid or vid in seen:
-        return
-    seen.add(vid)
-    items.append({"videoId": vid, "title": title or "", "byline": byline or "",
-                  "lengthText": length or "", "videoInfo": info or ""})
+    def add(vid, title, byline="", length="", info=""):
+        if not vid or vid in seen:
+            return
+        seen.add(vid)
+        out.append({"videoId": vid, "title": title or "", "byline": byline or "",
+                    "lengthText": length or "", "videoInfo": info or ""})
 
-def extract(d):
-    n0 = len(items)
     pvrs = []
     walk(d, "playlistVideoRenderer", pvrs)
     for p in pvrs:
@@ -101,16 +99,68 @@ def extract(d):
         add(p.get("videoId"), txt(p.get("title")),
             txt(p.get("ownerText")) or txt(p.get("longBylineText")),
             txt(p.get("lengthText")), txt(p.get("publishedTimeText")))
-    return len(items) - n0
+    return out
 
-page = ""
+def dedupe(lists):
+    seen = set()
+    out = []
+    for l in lists:
+        for it in l:
+            if it["videoId"] in seen:
+                continue
+            seen.add(it["videoId"])
+            out.append(it)
+    return out
+
+def run_source(ctx, extra):
+    try:
+        resp = post(API, dict({"context": {"client": ctx}}, **extra))
+        d = json.loads(resp)
+    except Exception as e:
+        return [], "err=%r" % (e,)
+    chunks = [extract_items(d)]
+    pending = get_tokens(d)
+    used = set()
+    guard = 0
+    log = ["first=%d" % len(chunks[0])]
+    while pending and guard < 30:
+        guard += 1
+        tok = pending.pop(0)
+        if tok in used:
+            continue
+        used.add(tok)
+        try:
+            d2 = json.loads(post(API, {"context": {"client": ctx}, "continuation": tok}))
+        except Exception as e:
+            log.append("cerr=%r" % (e,))
+            continue
+        got = extract_items(d2)
+        log.append("c+%d" % len(got))
+        chunks.append(got)
+        for t in get_tokens(d2):
+            if t not in used and t not in pending:
+                pending.append(t)
+    return dedupe(chunks), ",".join(log)
+
+diag = []
+
+# --- A) browseId VL<playlist>
+browse_items = []
+for cli in [WEB,
+            {"clientName": "ANDROID", "clientVersion": "19.09.37", "androidSdkVersion": 30, "hl": "en", "gl": "US"},
+            {"clientName": "MWEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}]:
+    got, log = run_source(cli, {"browseId": "VL" + PLID})
+    diag.append("browse[%s] %s -> %d" % (cli["clientName"], log, len(got)))
+    if got:
+        browse_items = got
+        break
+
+# --- B) web page
+page_items = []
 try:
     page = get("https://www.youtube.com/playlist?list=%s&hl=en&persist_hl=1" % PLID)
-    diag.append("page_len=%d" % len(page))
-    count_texts = re.findall(r"([\d,]+)\s*videos?", page)
-    diag.append("count_texts=" + ",".join(count_texts[:8]))
     data = parse_json_after(page, "var ytInitialData = ")
-    diag.append("extracted_page=%d" % extract(data))
+    chunks = [extract_items(data)]
     pending = get_tokens(data)
     used = set()
     guard = 0
@@ -121,33 +171,38 @@ try:
             continue
         used.add(tok)
         try:
-            d2 = json.loads(post(API, dict(WEBCTX, continuation=tok)))
-        except Exception as e:
-            diag.append("cont_err=%r" % (e,))
+            d2 = json.loads(post(API, {"context": {"client": WEB}, "continuation": tok}))
+        except Exception:
             continue
-        before = len(items)
-        extract(d2)
-        diag.append("cont_new=%d total=%d" % (len(items) - before, len(items)))
+        chunks.append(extract_items(d2))
         for t in get_tokens(d2):
             if t not in used and t not in pending:
                 pending.append(t)
-    diag.append("final=%d" % len(items))
+    page_items = dedupe(chunks)
+    diag.append("page_items=%d" % len(page_items))
+    diag.append("page_len=%d" % len(page))
+    count_texts = re.findall(r"([\d,]+)\s*videos?", page)
+    diag.append("count_texts=" + ",".join(count_texts[:8]))
+    diag.append("private_str=%d deleted_str=%d" % (page.count("Private video"), page.count("Deleted video")))
 except Exception as e:
     diag.append("page_err=%r" % (e,))
 
+final = dedupe([page_items, browse_items])
+diag.append("final=%d" % len(final))
+
 os.makedirs("out", exist_ok=True)
 open("out/diag.txt", "w").write("\n".join(diag))
-json.dump({"num": len(items), "items": items}, open("out/playlist.json", "w"), indent=1, ensure_ascii=False)
+json.dump({"num": len(final), "items": final}, open("out/playlist.json", "w"), indent=1, ensure_ascii=False)
 lines = []
-for i, it in enumerate(items):
+for i, it in enumerate(final):
     lines.append("%d | %s | %s | %s | %s" % (i + 1, it["videoId"], it["title"], it["byline"], it["lengthText"]))
 open("out/titles.txt", "w").write("\n".join(lines))
 
-if items:
+if final:
     CHUNK = 6
     buf = []
     idx = 0
-    for i, it in enumerate(items):
+    for i, it in enumerate(final):
         desc = ""
         err = ""
         try:
@@ -170,5 +225,5 @@ if items:
     if buf:
         open("out/d_%02d.txt" % idx, "w").write("\n\n".join(buf))
 
-print("DONE items=%d" % len(items))
+print("DONE items=%d" % len(final))
 print("\n".join(diag))
