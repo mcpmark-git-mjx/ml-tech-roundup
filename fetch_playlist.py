@@ -3,6 +3,7 @@ import json, os, re, urllib.request
 PLID = "PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 API = "https://www.youtube.com/youtubei/v1/browse?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false"
+WEBCTX = {"context": {"client": {"clientName": "WEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}}}
 
 def get(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
@@ -43,6 +44,17 @@ def txt(x):
             return x["content"]
         return x.get("simpleText", "")
     return str(x)
+
+def get_tokens(d):
+    toks = []
+    for key in ("continuationCommand", "getContinuationCommand", "nextContinuationData"):
+        found = []
+        walk(d, key, found)
+        for f in found:
+            t = f.get("token") if isinstance(f, dict) else None
+            if t and t not in toks:
+                toks.append(t)
+    return toks
 
 items = []
 seen = set()
@@ -95,83 +107,41 @@ page = ""
 try:
     page = get("https://www.youtube.com/playlist?list=%s&hl=en&persist_hl=1" % PLID)
     diag.append("page_len=%d" % len(page))
-    diag.append("has_ytid=%s" % ("var ytInitialData" in page))
-    diag.append("has_pvr_str=%s" % ("playlistVideoRenderer" in page))
-    diag.append("has_lockup_str=%s" % ("lockupViewModel" in page))
-    mt = re.search(r"<title>(.*?)</title>", page, re.S)
-    diag.append("title=%s" % (mt.group(1) if mt else "?"))
     count_texts = re.findall(r"([\d,]+)\s*videos?", page)
     diag.append("count_texts=" + ",".join(count_texts[:8]))
     data = parse_json_after(page, "var ytInitialData = ")
-    if data is None:
-        diag.append("parse_ytid=fail")
-    else:
-        keys = set()
-        def ck(o):
-            if isinstance(o, dict):
-                for k in o:
-                    if (k.endswith("Renderer") or k.endswith("ViewModel")) and k not in keys:
-                        keys.add(k)
-                for v in o.values():
-                    ck(v)
-            elif isinstance(o, list):
-                for v in o:
-                    ck(v)
-        ck(data)
-        diag.append("keys=" + ",".join(sorted(keys)))
-        diag.append("extracted_page=%d" % extract(data))
-        conts = []
-        walk(data, "continuationItemRenderer", conts)
-        ctx = {"context": {"client": {"clientName": "WEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}}}
-        guard = 0
-        while conts and guard < 40:
-            guard += 1
-            c = conts.pop(0)
-            tok = ((c.get("continuationEndpoint") or {}).get("continuationCommand") or {}).get("token")
-            if not tok:
-                continue
-            try:
-                d2 = json.loads(post(API, dict(ctx, continuation=tok)))
-                extract(d2)
-                walk(d2, "continuationItemRenderer", conts)
-            except Exception as e:
-                diag.append("cont_err=%r" % (e,))
-                break
-        diag.append("after_cont=%d" % len(items))
+    diag.append("extracted_page=%d" % extract(data))
+    pending = get_tokens(data)
+    used = set()
+    guard = 0
+    while pending and guard < 30:
+        guard += 1
+        tok = pending.pop(0)
+        if tok in used:
+            continue
+        used.add(tok)
+        try:
+            d2 = json.loads(post(API, dict(WEBCTX, continuation=tok)))
+        except Exception as e:
+            diag.append("cont_err=%r" % (e,))
+            continue
+        before = len(items)
+        extract(d2)
+        diag.append("cont_new=%d total=%d" % (len(items) - before, len(items)))
+        for t in get_tokens(d2):
+            if t not in used and t not in pending:
+                pending.append(t)
+    diag.append("final=%d" % len(items))
 except Exception as e:
     diag.append("page_err=%r" % (e,))
-
-if len(items) == 0:
-    for cli in [
-        {"clientName": "WEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"},
-        {"clientName": "ANDROID", "clientVersion": "19.09.37", "androidSdkVersion": 30, "hl": "en", "gl": "US"},
-        {"clientName": "MWEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"},
-    ]:
-        try:
-            resp = post(API, {"context": {"client": cli}, "browseId": "VL" + PLID})
-            d = json.loads(resp)
-            diag.append("browse_%s_extracted=%d" % (cli["clientName"], extract(d)))
-            conts = []
-            walk(d, "continuationItemRenderer", conts)
-            guard = 0
-            while conts and guard < 40:
-                guard += 1
-                c = conts.pop(0)
-                tok = ((c.get("continuationEndpoint") or {}).get("continuationCommand") or {}).get("token")
-                if not tok:
-                    continue
-                d2 = json.loads(post(API, {"context": {"client": cli}, "continuation": tok}))
-                extract(d2)
-                walk(d2, "continuationItemRenderer", conts)
-            diag.append("browse_%s_total=%d" % (cli["clientName"], len(items)))
-            if len(items):
-                break
-        except Exception as e:
-            diag.append("browse_%s_err=%r" % (cli["clientName"], e))
 
 os.makedirs("out", exist_ok=True)
 open("out/diag.txt", "w").write("\n".join(diag))
 json.dump({"num": len(items), "items": items}, open("out/playlist.json", "w"), indent=1, ensure_ascii=False)
+lines = []
+for i, it in enumerate(items):
+    lines.append("%d | %s | %s | %s | %s" % (i + 1, it["videoId"], it["title"], it["byline"], it["lengthText"]))
+open("out/titles.txt", "w").write("\n".join(lines))
 
 if items:
     CHUNK = 6
