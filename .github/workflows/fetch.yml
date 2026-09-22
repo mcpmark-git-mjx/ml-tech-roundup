@@ -11,9 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run script
-        run: |
-          python3 debug_playlist.py || true
-          python3 fetch_playlist.py || true
+        run: python3 debug_playlist.py || true
       - name: Commit results
         run: |
           git config user.name "github-actions[bot]"

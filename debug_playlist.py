@@ -58,7 +58,6 @@ def get_tokens(d):
     return toks
 
 def raw_items(d):
-    """Return list of dicts in document order, no dedupe."""
     out = []
     pvrs = []
     walk(d, "playlistVideoRenderer", pvrs)
@@ -85,59 +84,67 @@ def raw_items(d):
         out.append({"kind": "lockup", "videoId": vid, "title": t, "byline": by})
     return out
 
-diag = []
+def all_keys(d):
+    keys = set()
+    def ck(o):
+        if isinstance(o, dict):
+            for k in o:
+                if k.endswith("Renderer") or k.endswith("ViewModel"):
+                    keys.add(k)
+            for v in o.values():
+                ck(v)
+        elif isinstance(o, list):
+            for v in o:
+                ck(v)
+    ck(d)
+    return keys
+
+D = []
 os.makedirs("out", exist_ok=True)
 
-# --- page
 page = get("https://www.youtube.com/playlist?list=%s&hl=en&persist_hl=1" % PLID)
 data = parse_json_after(page, "var ytInitialData = ")
 page_raw = raw_items(data)
-diag.append("page_raw=%d" % len(page_raw))
+D.append("page_raw=%d" % len(page_raw))
 c = Counter([x["videoId"] for x in page_raw])
-diag.append("page_distinct=%d dups=%s" % (len(c), json.dumps({k: v for k, v in c.items() if v > 1})))
+D.append("page_distinct=%d dups=%s" % (len(c), json.dumps({k: v for k, v in c.items() if v > 1})))
+D.append("page_tokens=%d" % len(get_tokens(data)))
 mt = re.search(r"([\d,]+) videos", page)
-diag.append("page_count_text=%s" % (mt.group(1) if mt else "?"))
-open("out/raw_page_ids.txt", "w").write("\n".join("%s\t%s\t%s" % (x["videoId"], x["title"], x["byline"]) for x in page_raw))
+D.append("page_count_text=%s" % (mt.group(1) if mt else "?"))
 
-# --- browse for each client
 for cli in [WEB,
             {"clientName": "ANDROID", "clientVersion": "19.09.37", "androidSdkVersion": 30, "hl": "en", "gl": "US"},
             {"clientName": "MWEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"},
-            {"clientName": "TVHTML5", "clientVersion": "7.20240920.00.00", "hl": "en", "gl": "US"}]:
+            {"clientName": "TVHTML5", "clientVersion": "7.20240920.00.00", "hl": "en", "gl": "US"},
+            {"clientName": "WEB_EMBEDDED_PLAYER", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}]:
+    tag = cli["clientName"]
     try:
         resp = post(API, {"context": {"client": cli}, "browseId": "VL" + PLID})
         d = json.loads(resp)
     except Exception as e:
-        diag.append("browse[%s] err=%r" % (cli["clientName"], e))
+        D.append("browse[%s] err=%r" % (tag, e))
         continue
     raw = raw_items(d)
     toks = get_tokens(d)
-    diag.append("browse[%s] raw=%d tokens=%d kinds=%s" % (
-        cli["clientName"], len(raw), len(toks), ",".join(sorted(set(x["kind"] for x in raw)))))
     cc = Counter([x["videoId"] for x in raw])
-    diag.append("browse[%s] distinct=%d dups=%s" % (cli["clientName"], len(cc), json.dumps({k: v for k, v in cc.items() if v > 1})))
-    if cli["clientName"] == "WEB":
-        open("out/raw_browse_ids.txt", "w").write("\n".join("%s\t%s\t%s" % (x["videoId"], x["title"], x["byline"]) for x in raw))
-        # try each token, dump result keys
-        for i, tok in enumerate(toks[:5]):
+    D.append("browse[%s] raw=%d kinds=%s distinct=%d dups=%s tokens=%d" % (
+        tag, len(raw), ",".join(sorted(set(x["kind"] for x in raw))), len(cc),
+        json.dumps({k: v for k, v in cc.items() if v > 1}), len(toks)))
+    if tag == "WEB":
+        open("out/raw_browse_ids.txt", "w").write(
+            "\n".join("%s\t%s\t%s" % (x["videoId"], x["title"], x["byline"]) for x in raw))
+        open("out/browse_keys.txt", "w").write(",".join(sorted(all_keys(d))))
+        for i, tok in enumerate(toks[:6]):
             try:
                 d2 = json.loads(post(API, {"context": {"client": cli}, "continuation": tok}))
                 r2 = raw_items(d2)
-                keys = set()
-                def ck(o):
-                    if isinstance(o, dict):
-                        for k in o:
-                            if k.endswith("Renderer") or k.endswith("ViewModel"):
-                                keys.add(k)
-                        for v in o.values():
-                            ck(v)
-                    elif isinstance(o, list):
-                        for v in o:
-                            ck(v)
-                ck(d2)
-                diag.append("tok%d items=%d keys=%s" % (i, len(r2), ",".join(sorted(keys)[:25])))
+                D.append("tok%d items=%d kinds=%s keys=%s" % (
+                    i, len(r2), ",".join(sorted(set(x["kind"] for x in r2))), ",".join(sorted(all_keys(d2))[:30])))
+                if r2:
+                    open("out/tok%d_ids.txt" % i, "w").write(
+                        "\n".join("%s\t%s" % (x["videoId"], x["title"]) for x in r2))
             except Exception as e:
-                diag.append("tok%d err=%r" % (i, e))
+                D.append("tok%d err=%r" % (i, e))
 
-open("out/diag.txt", "w").write("\n".join(diag))
-print("\n".join(diag))
+open("out/debug.txt", "w").write("\n".join(D))
+print("\n".join(D))
