@@ -5,6 +5,7 @@ PLID = "PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 API = "https://www.youtube.com/youtubei/v1/browse?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false"
 WEB = {"clientName": "WEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}
+MWEB = {"clientName": "MWEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}
 
 def get(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
@@ -62,89 +63,66 @@ def raw_items(d):
     pvrs = []
     walk(d, "playlistVideoRenderer", pvrs)
     for p in pvrs:
-        out.append({"kind": "pvr", "videoId": p.get("videoId"), "title": txt(p.get("title")),
-                    "byline": txt(p.get("shortBylineText")) or txt(p.get("ownerText"))})
+        out.append({"videoId": p.get("videoId"), "title": txt(p.get("title"))})
     lus = []
     walk(d, "lockupViewModel", lus)
     for l in lus:
-        vid = l.get("contentId")
         t = ""
-        by = ""
         try:
-            md = l.get("metadata", {}).get("lockupMetadataViewModel", {})
-            t = txt(md.get("title"))
-            rows = md.get("metadata", {}).get("contentMetadataViewModel", {}).get("metadataRows", [])
-            parts = []
-            for row in rows:
-                for ppart in row.get("metadataParts", []):
-                    parts.append(txt(ppart.get("text")))
-            by = " | ".join([x for x in parts if x])
+            t = txt(l.get("metadata", {}).get("lockupMetadataViewModel", {}).get("title"))
         except Exception:
             pass
-        out.append({"kind": "lockup", "videoId": vid, "title": t, "byline": by})
+        out.append({"videoId": l.get("contentId"), "title": t})
     return out
-
-def all_keys(d):
-    keys = set()
-    def ck(o):
-        if isinstance(o, dict):
-            for k in o:
-                if k.endswith("Renderer") or k.endswith("ViewModel"):
-                    keys.add(k)
-            for v in o.values():
-                ck(v)
-        elif isinstance(o, list):
-            for v in o:
-                ck(v)
-    ck(d)
-    return keys
 
 D = []
 os.makedirs("out", exist_ok=True)
 
 page = get("https://www.youtube.com/playlist?list=%s&hl=en&persist_hl=1" % PLID)
-data = parse_json_after(page, "var ytInitialData = ")
-page_raw = raw_items(data)
-D.append("page_raw=%d" % len(page_raw))
-c = Counter([x["videoId"] for x in page_raw])
-D.append("page_distinct=%d dups=%s" % (len(c), json.dumps({k: v for k, v in c.items() if v > 1})))
-D.append("page_tokens=%d" % len(get_tokens(data)))
-mt = re.search(r"([\d,]+) videos", page)
-D.append("page_count_text=%s" % (mt.group(1) if mt else "?"))
+ctxs = []
+for m in re.finditer(r"videos?", page):
+    s = max(0, m.start() - 120)
+    ctxs.append(re.sub(r"\s+", " ", page[s:m.end() + 60]))
+D.append("VIDEO_CTX_COUNT=%d" % len(ctxs))
+open("out/video_ctx.txt", "w").write("\n---\n".join(ctxs[:60]))
 
-for cli in [WEB,
-            {"clientName": "ANDROID", "clientVersion": "19.09.37", "androidSdkVersion": 30, "hl": "en", "gl": "US"},
-            {"clientName": "MWEB", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"},
-            {"clientName": "TVHTML5", "clientVersion": "7.20240920.00.00", "hl": "en", "gl": "US"},
-            {"clientName": "WEB_EMBEDDED_PLAYER", "clientVersion": "2.20240920.01.00", "hl": "en", "gl": "US"}]:
-    tag = cli["clientName"]
-    try:
-        resp = post(API, {"context": {"client": cli}, "browseId": "VL" + PLID})
-        d = json.loads(resp)
-    except Exception as e:
-        D.append("browse[%s] err=%r" % (tag, e))
-        continue
-    raw = raw_items(d)
-    toks = get_tokens(d)
-    cc = Counter([x["videoId"] for x in raw])
-    D.append("browse[%s] raw=%d kinds=%s distinct=%d dups=%s tokens=%d" % (
-        tag, len(raw), ",".join(sorted(set(x["kind"] for x in raw))), len(cc),
-        json.dumps({k: v for k, v in cc.items() if v > 1}), len(toks)))
-    if tag == "WEB":
-        open("out/raw_browse_ids.txt", "w").write(
-            "\n".join("%s\t%s\t%s" % (x["videoId"], x["title"], x["byline"]) for x in raw))
-        open("out/browse_keys.txt", "w").write(",".join(sorted(all_keys(d))))
-        for i, tok in enumerate(toks[:6]):
-            try:
-                d2 = json.loads(post(API, {"context": {"client": cli}, "continuation": tok}))
-                r2 = raw_items(d2)
-                D.append("tok%d items=%d kinds=%s keys=%s" % (
-                    i, len(r2), ",".join(sorted(set(x["kind"] for x in r2))), ",".join(sorted(all_keys(d2))[:30])))
-                if r2:
-                    open("out/tok%d_ids.txt" % i, "w").write(
-                        "\n".join("%s\t%s" % (x["videoId"], x["title"]) for x in r2))
-            except Exception as e:
-                D.append("tok%d err=%r" % (i, e))
+# --- WEB continuation raw dump
+resp = post(API, {"context": {"client": WEB}, "browseId": "VL" + PLID})
+d = json.loads(resp)
+toks = get_tokens(d)
+D.append("web_toks=%d" % len(toks))
+if toks:
+    r2 = post(API, {"context": {"client": WEB}, "continuation": toks[0]})
+    open("out/web_cont_raw.txt", "w").write(r2[:6000])
+    D.append("web_cont_len=%d" % len(r2))
+
+# --- MWEB pagination
+try:
+    resp = post(API, {"context": {"client": MWEB}, "browseId": "VL" + PLID})
+    d = json.loads(resp)
+    allitems = raw_items(d)
+    pending = get_tokens(d)
+    used = set()
+    guard = 0
+    D.append("mweb_first=%d toks=%d" % (len(allitems), len(pending)))
+    while pending and guard < 20:
+        guard += 1
+        tok = pending.pop(0)
+        if tok in used:
+            continue
+        used.add(tok)
+        d2 = json.loads(post(API, {"context": {"client": MWEB}, "continuation": tok}))
+        got = raw_items(d2)
+        D.append("mweb_c+%d" % len(got))
+        allitems.extend(got)
+        for t in get_tokens(d2):
+            if t not in used and t not in pending:
+                pending.append(t)
+    cc = Counter([x["videoId"] for x in allitems])
+    D.append("mweb_total=%d distinct=%d" % (len(allitems), len(cc)))
+    open("out/mweb_ids.txt", "w").write("\n".join("%s\t%s" % (x["videoId"], x["title"]) for x in allitems))
+except Exception as e:
+    D.append("mweb_err=%r" % (e,))
 
 open("out/debug.txt", "w").write("\n".join(D))
 print("\n".join(D))
