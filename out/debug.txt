@@ -1,6 +1,7 @@
-VIDEO_CTX_COUNT=1396
-web_toks=1
-web_cont_len=1206
-mweb_first=20 toks=1
+big_count_matches=1
+pageHeaderViewModel=1
+header_texts=["MCP-youtube", "by Jian Zhao", "Playlist", "52 videos", "44 views", "Shuffle", "Show unavailable videos", "...more", "Play all"]
+playlistMetadata={"title": "MCP-youtube", "androidAppindexingLink": "android-app://com.google.android.youtube/http/www.youtube.com/playlist?list=PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7", "iosAppindexingLink": "ios-app://544007664/vnd.youtube/www.youtube.com/playlist?list=PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7"}
+mweb_first=20 toks2=1
 mweb_c+20
 mweb_total=40 distinct=40
