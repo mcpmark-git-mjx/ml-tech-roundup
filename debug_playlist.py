@@ -1,5 +1,4 @@
 import json, os, re, urllib.request
-from collections import Counter
 
 PLID = "PLyzTA8cetPdHtlGw1X8Kt7Ea4bd27ApR7"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -47,17 +46,6 @@ def txt(x):
         return x.get("simpleText", "")
     return str(x)
 
-def get_tokens(d):
-    toks = []
-    for key in ("continuationCommand", "getContinuationCommand", "nextContinuationData"):
-        found = []
-        walk(d, key, found)
-        for f in found:
-            t = f.get("token") if isinstance(f, dict) else None
-            if t and t not in toks:
-                toks.append(t)
-    return toks
-
 def raw_items(d):
     out = []
     pvrs = []
@@ -75,36 +63,89 @@ def raw_items(d):
         out.append({"videoId": l.get("contentId"), "title": t})
     return out
 
+def get_tokens(d):
+    toks = []
+    for key in ("continuationCommand", "getContinuationCommand", "nextContinuationData"):
+        found = []
+        walk(d, key, found)
+        for f in found:
+            t = f.get("token") if isinstance(f, dict) else None
+            if t and t not in toks:
+                toks.append(t)
+    return toks
+
+def get_tokens2(d):
+    toks = []
+    found = []
+    walk(d, "continuationItemViewModel", found)
+    for f in found:
+        s = json.dumps(f)
+        for m in re.finditer(r'"token":\s*"([^"]+)"', s):
+            if m.group(1) not in toks:
+                toks.append(m.group(1))
+    for key in ("continuationCommand", "getContinuationCommand", "nextContinuationData"):
+        found = []
+        walk(d, key, found)
+        for f in found:
+            t = f.get("token") if isinstance(f, dict) else None
+            if t and t not in toks:
+                toks.append(t)
+    return toks
+
 D = []
 os.makedirs("out", exist_ok=True)
 
 page = get("https://www.youtube.com/playlist?list=%s&hl=en&persist_hl=1" % PLID)
-ctxs = []
-for m in re.finditer(r"videos?", page):
-    s = max(0, m.start() - 120)
-    ctxs.append(re.sub(r"\s+", " ", page[s:m.end() + 60]))
-D.append("VIDEO_CTX_COUNT=%d" % len(ctxs))
-open("out/video_ctx.txt", "w").write("\n---\n".join(ctxs[:60]))
+data = parse_json_after(page, "var ytInitialData = ")
 
-# --- WEB continuation raw dump
-resp = post(API, {"context": {"client": WEB}, "browseId": "VL" + PLID})
-d = json.loads(resp)
-toks = get_tokens(d)
-D.append("web_toks=%d" % len(toks))
-if toks:
-    r2 = post(API, {"context": {"client": WEB}, "continuation": toks[0]})
-    open("out/web_cont_raw.txt", "w").write(r2[:6000])
-    D.append("web_cont_len=%d" % len(r2))
+# count contexts with big numbers
+big = []
+for m in re.finditer(r"(\d[\d,]{0,6})\s*videos?", page):
+    n = m.group(1)
+    try:
+        if int(n.replace(",", "")) > 5:
+            s = max(0, m.start() - 200)
+            big.append("NUM=%s CTX=%s" % (n, re.sub(r"\s+", " ", page[s:m.end() + 80])))
+    except Exception:
+        pass
+D.append("big_count_matches=%d" % len(big))
+open("out/bigcount.txt", "w").write("\n===\n".join(big[:30]))
 
-# --- MWEB pagination
+# page header metadata
+phs = []
+walk(data, "pageHeaderViewModel", phs)
+D.append("pageHeaderViewModel=%d" % len(phs))
+if phs:
+    open("out/page_header.json", "w").write(json.dumps(phs[0], indent=1)[:20000])
+    texts = []
+    def collect_text(o):
+        if isinstance(o, dict):
+            if isinstance(o.get("content"), str) and o.get("content"):
+                texts.append(o["content"])
+            if isinstance(o.get("text"), str) and o.get("text"):
+                texts.append(o["text"])
+            for v in o.values():
+                collect_text(v)
+        elif isinstance(o, list):
+            for v in o:
+                collect_text(v)
+    collect_text(phs[0])
+    D.append("header_texts=%s" % json.dumps(texts[:40]))
+
+# playlist metadata renderer
+pmr = []
+walk(data, "playlistMetadataRenderer", pmr)
+if pmr:
+    D.append("playlistMetadata=%s" % json.dumps(pmr[0])[:800])
+
+# MWEB full pagination with token2
 try:
-    resp = post(API, {"context": {"client": MWEB}, "browseId": "VL" + PLID})
-    d = json.loads(resp)
+    d = json.loads(post(API, {"context": {"client": MWEB}, "browseId": "VL" + PLID}))
     allitems = raw_items(d)
-    pending = get_tokens(d)
+    pending = get_tokens2(d)
     used = set()
     guard = 0
-    D.append("mweb_first=%d toks=%d" % (len(allitems), len(pending)))
+    D.append("mweb_first=%d toks2=%d" % (len(allitems), len(pending)))
     while pending and guard < 20:
         guard += 1
         tok = pending.pop(0)
@@ -115,9 +156,10 @@ try:
         got = raw_items(d2)
         D.append("mweb_c+%d" % len(got))
         allitems.extend(got)
-        for t in get_tokens(d2):
+        for t in get_tokens2(d2):
             if t not in used and t not in pending:
                 pending.append(t)
+    from collections import Counter
     cc = Counter([x["videoId"] for x in allitems])
     D.append("mweb_total=%d distinct=%d" % (len(allitems), len(cc)))
     open("out/mweb_ids.txt", "w").write("\n".join("%s\t%s" % (x["videoId"], x["title"]) for x in allitems))
